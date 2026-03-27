@@ -1,1 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Parametric Voice Visualizer</title>
+<style>
+  body { margin:0; overflow:hidden; background:#020b18; }
+  canvas { display:block; }
+  #controls {
+    position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+  }
+  button {
+    padding:10px 15px; margin:5px;
+    background:transparent; border:1px solid rgba(255,255,255,0.5);
+    color:white; cursor:pointer;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="controls">
+  <button id="start">Activate Mic</button>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W,H;
+function resize(){ W=canvas.width=innerWidth; H=canvas.height=innerHeight; }
+window.addEventListener('resize', resize); resize();
+
+let audioCtx, analyser, freqData, timeData;
+let running=false;
+
+// smoothed variables
+let sBass=0, sMid=0, sHighMid=0, sRMS=0, sHue=200;
+
+// Lissajous history (IMPORTANT)
+const LISS_HISTORY = 1200;
+let lissPoints = [];
+
+// mic setup
+document.getElementById('start').onclick = async ()=>{
+  audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+  const src = audioCtx.createMediaStreamSource(stream);
+
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.75;
+
+  src.connect(analyser);
+
+  freqData = new Uint8Array(analyser.frequencyBinCount);
+  timeData = new Uint8Array(analyser.fftSize);
+
+  running=true;
+};
+
+function bandEnergy(data,sr,low,high){
+  const nyq = sr/2;
+  const lowI = Math.floor(low/nyq*data.length);
+  const highI = Math.floor(high/nyq*data.length);
+  let sum=0;
+  for(let i=lowI;i<highI;i++) sum+=data[i];
+  return sum/(highI-lowI)/255;
+}
+
+function render(){
+  requestAnimationFrame(render);
+
+  // slow fade (key visual effect)
+  ctx.fillStyle = 'rgba(2,11,24,0.05)';
+  ctx.fillRect(0,0,W,H);
+
+  if(!running) return;
+
+  analyser.getByteFrequencyData(freqData);
+  analyser.getByteTimeDomainData(timeData);
+
+  const sr = audioCtx.sampleRate;
+
+  const bass    = bandEnergy(freqData,sr,80,250);
+  const mid     = bandEnergy(freqData,sr,800,2500);
+  const highmid = bandEnergy(freqData,sr,2500,6000);
+
+  // RMS
+  let rms=0;
+  for(let i=0;i<timeData.length;i++){
+    const v=(timeData[i]-128)/128;
+    rms+=v*v;
+  }
+  rms=Math.sqrt(rms/timeData.length);
+
+  // smoothing
+  const sm=0.12;
+  sBass    = sBass*(1-sm)+bass*sm*3;
+  sMid     = sMid*(1-sm)+mid*sm*3;
+  sHighMid = sHighMid*(1-sm)+highmid*sm*3;
+  sRMS     = sRMS*(1-sm)+rms*sm*5;
+
+  // hue mapping
+  const targetHue = (sHighMid*200)+160;
+  sHue = sHue*0.93 + targetHue*0.07;
+
+  // layered rendering
+  drawLissajous(0.3);
+  drawLissajous(0.6);
+  drawLissajous(1);
+
+  drawMandala();
+}
+
+function drawLissajous(alpha=1){
+  const cx=W/2, cy=H/2;
+  const t = performance.now()*0.001;
+
+  const freqRatioA = 2 + sBass * 3;
+  const freqRatioB = 3 + sHighMid * 2;
+  const phaseShift = t * 0.5 + sMid * Math.PI * 1.5;
+
+  const scale = Math.min(W,H)*0.3;
+
+  // generate point
+  const x = cx + Math.sin(phaseShift * freqRatioA) * scale;
+  const y = cy + Math.sin(phaseShift * freqRatioB) * scale;
+
+  lissPoints.push({x,y});
+  if(lissPoints.length > LISS_HISTORY) lissPoints.shift();
+
+  ctx.globalAlpha = alpha;
+
+  ctx.beginPath();
+  for(let i=0;i<lissPoints.length;i++){
+    const p = lissPoints[i];
+    i===0 ? ctx.moveTo(p.x,p.y) : ctx.lineTo(p.x,p.y);
+  }
+
+  ctx.strokeStyle = `hsl(${sHue},90%,65%)`;
+  ctx.lineWidth = 2 + sRMS*4;
+  ctx.shadowBlur = 15 + sRMS*30;
+  ctx.shadowColor = `hsl(${sHue},100%,70%)`;
+  ctx.stroke();
+
+  ctx.shadowBlur=0;
+  ctx.globalAlpha = 1;
+
+  // live dot
+  ctx.beginPath();
+  ctx.arc(x,y,3 + sRMS*12,0,Math.PI*2);
+  ctx.fillStyle = `hsl(${sHue},100%,70%)`;
+  ctx.fill();
+}
+
+function drawMandala(){
+  const cx=W/2, cy=H/2;
+  const t = performance.now()*0.001;
+
+  const petals = Math.round(4 + sHighMid * 10);
+  const rotSpeed = sMid * 0.04 + 0.003;
+
+  for(let ring=0; ring<3; ring++){
+    const ringR = (ring+1) * Math.min(W,H) * 0.15;
+    const bandVal = [sBass, sMid, sHighMid][ring];
+
+    for(let i=0;i<petals;i++){
+      const a = (i/petals)*Math.PI*2 + t*rotSpeed;
+
+      const petalLen = ringR * (0.6 + bandVal * 0.8);
+      const petalW   = ringR * (0.25 + sMid * 0.3);
+
+      const x1 = cx + Math.cos(a)*ringR;
+      const y1 = cy + Math.sin(a)*ringR;
+
+      const x2 = cx + Math.cos(a)*(ringR+petalLen);
+      const y2 = cy + Math.sin(a)*(ringR+petalLen);
+
+      ctx.beginPath();
+      ctx.moveTo(x1,y1);
+      ctx.quadraticCurveTo(
+        cx + Math.cos(a+0.2)*(ringR+petalW),
+        cy + Math.sin(a+0.2)*(ringR+petalW),
+        x2,y2
+      );
+
+      ctx.strokeStyle = `hsl(${sHue},90%,65%)`;
+      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = 0.6;
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+render();
+</script>
+</body>
+</html>
 
